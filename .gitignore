@@ -1,14 +1,21 @@
 __pycache__/
 *.py[cod]
 *.so
+*.swp
+*.swo
 
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
 
 *.egg-info/
 .eggs/
 dist/
 build/
+install/
+log/
 
 .DS_Store
 Thumbs.db
+.venv/
+venv/
