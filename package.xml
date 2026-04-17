@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>assist_detector</name>
+  <version>0.1.7</version>
+  <description>Japanese multi-person emotion overlay detector using DeepFace with stable OpenCV face detection</description>
+  <maintainer email="user@example.com">user</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>cv_bridge</depend>
+
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-pil</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
