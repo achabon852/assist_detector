@@ -36,16 +36,25 @@ def _find_cascade() -> str:
     candidates = [
         "/usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml",
         "/usr/share/opencv/haarcascades/haarcascade_frontalface_default.xml",
+        "/usr/share/opencv4/haarcascades_cuda/haarcascade_frontalface_default.xml",
     ]
     try:
         if hasattr(cv2, "data"):
             candidates.insert(0, cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
     except Exception:
         pass
+    env_path = os.environ.get("ASSIST_DETECTOR_CASCADE_PATH")
+    if env_path:
+        candidates.insert(0, env_path)
     for p in candidates:
         if os.path.exists(p):
             return p
-    raise FileNotFoundError("haarcascade_frontalface_default.xml not found")
+    searched = "\n".join(f"  - {path}" for path in candidates)
+    raise FileNotFoundError(
+        "haarcascade_frontalface_default.xml not found.\n"
+        "Install the Ubuntu package 'opencv-data' or set ASSIST_DETECTOR_CASCADE_PATH.\n"
+        f"Searched paths:\n{searched}"
+    )
 
 
 @dataclass
@@ -58,7 +67,8 @@ class Track:
     label_started_at: float = 0.0
     last_scores: dict = field(default_factory=dict)
     miss_count: int = 0
-    infer_interval: int = 3
+    infer_interval: int = 4
+    age_interval: int = 16
     seen_count: int = 0
 
 
@@ -90,6 +100,7 @@ class EmotionDetector(Node):
         self.max_miss = 10
         self.match_distance = 90.0
         self.deepface_warning_logged = False
+        self.detection_scale = 0.75
 
         if DEEPFACE_AVAILABLE:
             self.get_logger().info("DeepFace backend enabled")
@@ -194,15 +205,19 @@ class EmotionDetector(Node):
 
         return assigned
 
-    def infer_emotion(self, face_bgr):
+    def infer_emotion(self, face_bgr, with_age: bool):
         if not DEEPFACE_AVAILABLE:
             return "無表情", self.default_scores(), None
 
         try:
-            rgb = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2RGB)
+            if face_bgr.shape[0] > 224 or face_bgr.shape[1] > 224:
+                scale = min(224.0 / face_bgr.shape[0], 224.0 / face_bgr.shape[1])
+                resized = cv2.resize(face_bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+            else:
+                resized = face_bgr
             result = DeepFace.analyze(
-                img_path=rgb,
-                actions=["emotion", "age"],
+                img_path=cv2.cvtColor(resized, cv2.COLOR_BGR2RGB),
+                actions=["emotion", "age"] if with_age else ["emotion"],
                 detector_backend="skip",
                 enforce_detection=False,
                 silent=True,
@@ -210,8 +225,10 @@ class EmotionDetector(Node):
             if isinstance(result, list):
                 result = result[0]
 
-            age_value = result.get("age")
-            age = int(round(float(age_value))) if age_value is not None else None
+            age = None
+            if with_age:
+                age_value = result.get("age")
+                age = int(round(float(age_value))) if age_value is not None else None
 
             emotions = result.get("emotion", {})
             if not emotions:
@@ -292,7 +309,7 @@ class EmotionDetector(Node):
                 self.deepface_warning_logged = True
             return "無表情", self.default_scores(), None
 
-    def draw_label(self, frame_bgr, rect, label, track_id, duration_sec, scores, age):
+    def draw_label(self, draw, frame_shape, rect, label, track_id, duration_sec, scores, age):
         x, y, w, h = rect
         color = self.label_colors.get(label, (0, 90, 255))
         text = f"ID{track_id} {label}（{duration_sec:.1f}s）"
@@ -307,8 +324,6 @@ class EmotionDetector(Node):
             f"無表情 {scores.get('neutral', 0.0):4.1f}%",
         ]
 
-        pil = PILImage.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
-        draw = ImageDraw.Draw(pil)
         draw.rectangle([(x, y), (x + w, y + h)], outline=color, width=2)
         text_y = max(0, y - 34)
         draw.text((x, text_y), text, font=self.font, fill=color)
@@ -323,7 +338,7 @@ class EmotionDetector(Node):
             info_width = max(bbox[2] - bbox[0] for bbox in line_bboxes)
             line_height = max(bbox[3] - bbox[1] for bbox in line_bboxes)
             info_x = max(0, x + w - info_width - 6)
-            info_y = min(max(0, y + 4), max(0, frame_bgr.shape[0] - (line_height * len(info_lines)) - 4))
+            info_y = min(max(0, y + 4), max(0, frame_shape[0] - (line_height * len(info_lines)) - 4))
             for i, line in enumerate(info_lines):
                 line_y = info_y + i * line_height
                 for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, -1), (-1, 1), (1, 1)]:
@@ -331,14 +346,13 @@ class EmotionDetector(Node):
                 draw.text((info_x, line_y), line, font=self.small_font, fill=(255, 255, 255))
 
         score_y = text_bbox[3] + 2
-        if score_y + len(score_lines) * 18 > frame_bgr.shape[0]:
-            score_y = min(frame_bgr.shape[0] - len(score_lines) * 18 - 4, y + h + 4)
+        if score_y + len(score_lines) * 18 > frame_shape[0]:
+            score_y = min(frame_shape[0] - len(score_lines) * 18 - 4, y + h + 4)
         for i, line in enumerate(score_lines):
             line_y = max(0, score_y + i * 18)
             for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, -1), (-1, 1), (1, 1)]:
                 draw.text((score_x + dx, line_y + dy), line, font=self.small_font, fill=(0, 0, 0))
             draw.text((score_x, line_y), line, font=self.small_font, fill=(255, 255, 255))
-        return cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
 
     def cb(self, msg):
         try:
@@ -348,16 +362,25 @@ class EmotionDetector(Node):
             return
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if self.detection_scale != 1.0:
+            gray_for_detect = cv2.resize(gray, None, fx=self.detection_scale, fy=self.detection_scale, interpolation=cv2.INTER_LINEAR)
+        else:
+            gray_for_detect = gray
         faces = self.face.detectMultiScale(
-            gray,
+            gray_for_detect,
             scaleFactor=1.2,
             minNeighbors=5,
             minSize=(60, 60)
         )
-        detections = [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in faces]
+        if self.detection_scale != 1.0:
+            inv = 1.0 / self.detection_scale
+            detections = [(int(x * inv), int(y * inv), int(w * inv), int(h * inv)) for (x, y, w, h) in faces]
+        else:
+            detections = [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in faces]
 
         assigned = self.update_tracks(detections)
-        annotated = frame.copy()
+        pil = PILImage.fromarray(cv2.cvtColor(frame.copy(), cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(pil)
 
         for tid, bbox in assigned.items():
             x, y, w, h = bbox
@@ -374,18 +397,22 @@ class EmotionDetector(Node):
                 continue
 
             track = self.tracks[tid]
-            if track.seen_count % track.infer_interval == 0:
-                raw_label, scores, age = self.infer_emotion(face_bgr)
+            need_infer = (track.seen_count == 1) or (track.seen_count % track.infer_interval == 0)
+            need_age = (track.last_age is None) or (track.seen_count == 1) or (track.seen_count % track.age_interval == 0)
+            if need_infer:
+                raw_label, scores, age = self.infer_emotion(face_bgr, with_age=need_age)
                 smoothed_label = self.smooth_label(track, raw_label)
                 if smoothed_label != track.last_label:
                     track.label_started_at = time.monotonic()
                 track.last_label = smoothed_label
                 track.last_scores = scores
-                track.last_age = age
+                if age is not None:
+                    track.last_age = age
 
             duration_sec = max(0.0, time.monotonic() - track.label_started_at)
-            annotated = self.draw_label(
-                annotated,
+            self.draw_label(
+                draw,
+                frame.shape,
                 bbox,
                 track.last_label,
                 tid,
@@ -394,6 +421,7 @@ class EmotionDetector(Node):
                 track.last_age,
             )
 
+        annotated = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
         out = self.bridge.cv2_to_imgmsg(annotated, "bgr8")
         out.header = msg.header
         self.pub.publish(out)
